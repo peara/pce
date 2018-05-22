@@ -10,6 +10,15 @@ contract RootChain {
     using RLP for RLP.RLPItem;
     using RLP for RLP.Iterator;
 
+    struct ExitInfo {
+        address requester;
+        uint prevTxBlkNum;
+        address prevTxRec;
+        uint curTxBlkNum;
+        address curTxRec;
+        uint bond;
+    }
+
     /*
      * Events
      */
@@ -22,10 +31,12 @@ contract RootChain {
     address public tokenContract; // only accept token from this contract
     uint public depositCount;
     uint public currentBlkNum;
+    uint public minimumBond;
     mapping(uint => bytes32) public childChain; // store hash from child chain
-    mapping(bytes32 => uint) public wallet; // store deposited tokenID
-    mapping(bytes32 => address) public tokenOwner; // store owner of tokenID
+    mapping(bytes32 => uint) public wallet; // store deposited tokenID, this contract token ID => ERC721 token ID
+    mapping(bytes32 => address) public tokenOwner; // store owner of tokenID, for checkpointing and client validation
     mapping(uint => uint) public exits; // store current exit requests
+    mapping(uint => ExitInfo) public exitInfos;
 
     /*
      * Modifiers
@@ -35,16 +46,12 @@ contract RootChain {
         _;
     }
 
-    modifier isAccepted(address _address) {
-        require(_address == tokenContract);
-        _;
-    }
-
-    constructor(address _contract)
+    constructor(address _contract, uint _minimumBond)
         public
     {
         authority = msg.sender;
         tokenContract = _contract;
+        minimumBond = _minimumBond;
         depositCount = 0;
         currentBlkNum = 0;
     }
@@ -62,13 +69,11 @@ contract RootChain {
     }
 
     // @dev Allows anyone to deposit funds into the Plasma chain
-    // @param currency The address of currency or zero if deposit Eth
     // @param amount The amount of currency to deposit
-    function deposit(address tokenAddress, uint tokenID)
+    function deposit(uint tokenID)
         public
-        isAccepted(tokenAddress)
     {
-        ERC721 token721 = ERC721(tokenAddress);
+        ERC721 token721 = ERC721(tokenContract);
         require(token721.ownerOf(tokenID) == msg.sender); // only owner of token can deposit
 
         // expect to be approved first
@@ -95,7 +100,10 @@ contract RootChain {
         uint curTxBlkNum
     )
         public
+        payable
     {
+        require(msg.value >= minimumBond);
+
         RLP.RLPItem[] memory prevTxList = prevTx.toRLPItem().toList();
         RLP.RLPItem[] memory txList = curTx.toRLPItem().toList();
         require(prevTxList.length == 4);
@@ -124,5 +132,65 @@ contract RootChain {
         // Record the exitable timestamp.
         require(exits[uid] == 0);
         exits[uid] = block.timestamp + 2 weeks;
+
+        // TODO: store exit information
+        // exitInfos[uid] = ExitInfo();
+    }
+
+    // Allow anyone to finalize an exit which has passed challenge phase
+    function finalizeExit(uint uid) public {
+        require(exits[uid] != 0);
+        require(block.timestamp >= exits[uid]);
+
+        ExitInfo storage info = exitInfos[uid];
+        ERC721 token721 = ERC721(tokenContract);
+
+        bytes32 wuid = uintToBytes(uid);
+        token721.transfer(info.curTxRec, wallet[wuid]); // transfer the token
+        info.curTxRec.transfer(info.bond); // return the bond
+
+        // remove token info
+        delete wallet[wuid];
+        delete tokenOwner[wuid];
+
+        // remove exit request
+        delete exits[uid];
+        delete exitInfos[uid];
+    }
+
+    // This challenge presents a transaction spend the last tx
+    // will invalidate the exit request instantly if correct
+    function challengeType1(
+        uint uid,
+        bytes chaTx,
+        bytes chaTxProof,
+        uint chaTxBlkNum
+    )
+        public
+    {
+        require(exits[uid] != 0);
+        require(block.timestamp < exits[uid]);
+
+        RLP.RLPItem[] memory chaTxList = chaTx.toRLPItem().toList();
+        require(chaTxList.length == 4);
+
+        ExitInfo storage info = exitInfos[uid];
+        require(chaTxList[0].toUint() == info.curTxBlkNum); // prev block is last tx
+        require(chaTxList[1].toUint() == uid); // same uid
+        // TODO: check signature of chaTx is info.curTxRec
+
+        bytes32 merkleHash = keccak256(chaTx);
+        bytes32 root = childChain[chaTxBlkNum];
+        require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
+
+        // invalidate exit
+        msg.sender.transfer(minimumBond); // send bond to challenger
+        delete exits[uid];
+        delete exitInfos[uid];
+    }
+
+    // TODO: refactor to a lib
+    function uintToBytes(uint256 x) public pure returns (bytes32 b) {
+        assembly { mstore(add(b, 32), x) }
     }
 }
