@@ -4,6 +4,7 @@ import './libraries/merkle.sol';
 import './libraries/RLP.sol';
 import './ERC721.sol';
 
+// TODO: missing operator bond (in ETH) and reward (in some token, or ETH if we have some fees)
 contract RootChain {
     using Merkle for bytes32;
     using RLP for bytes;
@@ -43,6 +44,12 @@ contract RootChain {
      */
     modifier isAuthority() {
         require(msg.sender == authority);
+        _;
+    }
+
+    modifier exitRequestExisted(uint uid) {
+        require(exits[uid] != 0);
+        require(block.timestamp < exits[uid]);
         _;
     }
 
@@ -167,15 +174,13 @@ contract RootChain {
         uint chaTxBlkNum
     )
         public
+        exitRequestExisted(uid)
     {
-        require(exits[uid] != 0);
-        require(block.timestamp < exits[uid]);
-
         RLP.RLPItem[] memory chaTxList = chaTx.toRLPItem().toList();
         require(chaTxList.length == 4);
 
         ExitInfo storage info = exitInfos[uid];
-        require(chaTxList[0].toUint() == info.curTxBlkNum); // prev block is last tx
+        require(chaTxList[0].toUint() == info.curTxBlkNum); // prev block is curTx
         require(chaTxList[1].toUint() == uid); // same uid
         // TODO: check signature of chaTx is info.curTxRec
 
@@ -183,8 +188,38 @@ contract RootChain {
         bytes32 root = childChain[chaTxBlkNum];
         require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
 
-        // invalidate exit
-        msg.sender.transfer(minimumBond); // send bond to challenger
+        _invalidateExit(msg.sender, uid);
+    }
+
+    // This challenge presents a transaction spend prevTx and before curTx
+    // will invalidate the exit request instantly if correct
+    function challengeType2(
+        uint uid,
+        bytes chaTx,
+        bytes chaTxProof,
+        uint chaTxBlkNum
+    )
+        public
+        exitRequestExisted(uid)
+    {
+        RLP.RLPItem[] memory chaTxList = chaTx.toRLPItem().toList();
+        require(chaTxList.length == 4);
+
+        ExitInfo storage info = exitInfos[uid];
+        require(chaTxList[0].toUint() == info.prevTxBlkNum); // prev block is prevTx
+        require(chaTxList[1].toUint() == uid); // same uid
+        require(chaTxBlkNum < info.curTxBlkNum); // before last tx
+        // TODO: check signature of chaTx is info.prevTxRec
+
+        bytes32 merkleHash = keccak256(chaTx);
+        bytes32 root = childChain[chaTxBlkNum];
+        require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
+
+        _invalidateExit(msg.sender, uid);
+    }
+
+    function _invalidateExit(address challenger, uint uid) internal {
+        challenger.transfer(exitInfos[uid].bond); // send bond to challenger
         delete exits[uid];
         delete exitInfos[uid];
     }
