@@ -1,8 +1,13 @@
 pragma solidity ^0.4.23;
 
-import './libraries/merkle.sol';
-import './libraries/RLP.sol';
-import './ERC721.sol';
+import "./libraries/merkle.sol";
+import "./libraries/RLP.sol";
+
+interface ERC721 {
+    function ownerOf(uint _tokenID) external returns (address);
+    function transferFrom(address _from, address _to, uint _tokenID) external;
+    function transfer(address _to, uint tokenID) external;
+}
 
 // TODO: missing operator bond (in ETH) and reward (in some token, or ETH if we have some fees)
 contract RootChain {
@@ -85,6 +90,7 @@ contract RootChain {
 
         // expect to be approved first
         token721.transferFrom(msg.sender, address(this), tokenID);
+        require(token721.ownerOf(tokenID) == address(this));
 
         // why not use an array?
         // it seems that this is easier to manage (delete) than using an array
@@ -226,6 +232,7 @@ contract RootChain {
 
     // TODO: refactor to a lib
     function uintToBytes(uint256 x) public pure returns (bytes32 b) {
+        // solium-disable-next-line security/no-inline-assembly
         assembly { mstore(add(b, 32), x) }
     }
 }
