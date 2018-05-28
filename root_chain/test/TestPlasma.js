@@ -55,6 +55,12 @@ contract("PlasmaCashAuthorityContract", async (accounts) => {
       assert.deepEqual(await instance.wallet(uid), new BN(1));
       assert.equal(await instance.tokenOwner(uid), user1);
       assert.deepEqual(await instance.depositCount(), new BN(1));
+
+      it("can cancel deposit request", async () => {
+        await instance.cancelDeposit(uid, { from: user1 });
+        assert.equal(await s721Instance.ownerOf(1), user1);
+        assert.equal(instance.wallet(uid), 0);
+      });
     });
   });
 

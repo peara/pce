@@ -133,6 +133,7 @@ contract RootChain {
         // remove token info
         delete wallet[wuid];
         delete tokenOwner[wuid];
+        delete waitingDeposit[wuid];
     }
 
     function normalExit(
@@ -191,15 +192,17 @@ contract RootChain {
 
         bytes32 wuid = uintToBytes(uid);
         token721.transfer(info.requester, wallet[wuid]); // transfer the token
-        info.requester.transfer(info.bond); // return the bond
 
         // remove token info
         delete wallet[wuid];
         delete tokenOwner[wuid];
+        delete waitingDeposit[wuid];
 
         // remove exit request
         delete exits[uid];
         delete exitInfos[uid];
+
+        info.requester.transfer(info.bond); // return the bond
     }
 
     // This challenge presents a transaction spend the last tx
