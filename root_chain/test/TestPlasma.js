@@ -57,4 +57,18 @@ contract("PlasmaCashAuthorityContract", async (accounts) => {
       assert.deepEqual(await instance.depositCount(), new BN(1));
     });
   });
+
+  describe("Submit Block", async () => {
+
+  });
+
+  describe("Exit and Challenge", async () => {
+    before(async () => {
+        console.log(await instance.depositCount());
+    });
+
+    it("Sample test", async () => {
+        assert.equal(1, 1);
+    });
+  });
 });

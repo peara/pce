@@ -39,9 +39,12 @@ contract RootChain {
     uint public depositCount;
     uint public currentBlkNum;
     uint public minimumBond;
+    uint public depositPeriod;
+    uint public exitPeriod;
     mapping(uint => bytes32) public childChain; // store hash from child chain
     mapping(bytes32 => uint) public wallet; // store deposited tokenID, this contract token ID => ERC721 token ID
     mapping(bytes32 => address) public tokenOwner; // store owner of tokenID, for checkpointing and client validation
+    mapping(bytes32 => uint) public waitingDeposit; // store deadline of cancel deposit request
     mapping(uint => uint) public exits; // store current exit requests
     mapping(uint => ExitInfo) public exitInfos;
 
@@ -67,6 +70,8 @@ contract RootChain {
         minimumBond = _minimumBond;
         depositCount = 0;
         currentBlkNum = 0;
+        depositPeriod = 10 minutes;
+        exitPeriod = 1 weeks;
     }
 
     // @dev Allows Plasma chain operator to submit block root
@@ -100,9 +105,34 @@ contract RootChain {
         bytes32 uid = keccak256(msg.sender, tokenID, depositCount);
         wallet[uid] = tokenID;
         tokenOwner[uid] = msg.sender;
+        // user can cancel this request anytime before this deadline
+        // in case the operator withholds the token minting tx
+        waitingDeposit[uid] = block.timestamp + depositPeriod;
 
         depositCount += 1;
         emit Deposit(msg.sender, tokenID, uint256(uid));
+    }
+
+    /**
+        @dev Allow user to cancel deposit request incase of a blockwithholding attack happen right after deposit
+            as the user won't have any knowledge to exit
+        @params uid - uid of the token in Plasma contract, retrievable from Deposit event
+    */
+    function cancelDeposit(uint uid)
+        public
+    {
+        bytes32 wuid = uintToBytes(uid);
+
+        require(tokenOwner[wuid] == msg.sender);
+        require(block.timestamp <= waitingDeposit[wuid]);
+
+        ERC721 token721 = ERC721(tokenContract);
+
+        token721.transfer(msg.sender, wallet[wuid]); // transfer the token
+
+        // remove token info
+        delete wallet[wuid];
+        delete tokenOwner[wuid];
     }
 
     function normalExit(
@@ -147,7 +177,7 @@ contract RootChain {
 
         // Record the exitable timestamp.
         require(exits[uid] == 0);
-        exits[uid] = block.timestamp + 2 weeks;
+        exits[uid] = block.timestamp + exitPeriod;
         exitInfos[uid] = ExitInfo(msg.sender, curTxBlkNum, prevTxList[2].toAddress(), prevTxBlkNum, msg.value);
     }
 
