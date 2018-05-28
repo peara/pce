@@ -2,6 +2,7 @@ pragma solidity ^0.4.23;
 
 import "./libraries/merkle.sol";
 import "./libraries/RLP.sol";
+import "./libraries/ECRecovery.sol";
 
 interface ERC721 {
     function ownerOf(uint _tokenID) external returns (address);
@@ -15,13 +16,13 @@ contract RootChain {
     using RLP for bytes;
     using RLP for RLP.RLPItem;
     using RLP for RLP.Iterator;
+    using ECRecovery for bytes32;
 
     struct ExitInfo {
-        address requester;
-        uint prevTxBlkNum;
-        address prevTxRec;
-        uint curTxBlkNum;
-        address curTxRec;
+        address requester; // current owner, same as the receiver in curTxBlkNum
+        uint curTxBlkNum;  // the block contains tx transfer to requester
+        address prevOwner; // previous owner of the token
+        uint prevTxBlkNum; // the block contains tx transfer to previous owner
         uint bond;
     }
 
@@ -81,7 +82,7 @@ contract RootChain {
     }
 
     // @dev Allows anyone to deposit funds into the Plasma chain
-    // @param amount The amount of currency to deposit
+    // @param tokenID - id of the token
     function deposit(uint tokenID)
         public
     {
@@ -130,8 +131,10 @@ contract RootChain {
 
         require(prevTxBlkNum == txList[0].toUint());
         require(prevTxList[1].toUint() == txList[1].toUint());
-        require(msg.sender == txList[3].toAddress()); // tx_to = msg.sender
-        // TODO: check signature - signer of tx = receiver of prevTx
+        require(msg.sender == txList[2].toAddress()); // tx_to == msg.sender
+
+        bytes32 hashTx = keccak256(txList[0].toBytes(), txList[1].toBytes(), txList[2].toBytes()); // should confirm hash of type address vs bytes
+        require(hashTx.recover(txList[3].toBytes()) == prevTxList[2].toAddress()); // prevTx_to == signer of Tx
 
         uint uid = txList[1].toUint();
 
@@ -145,9 +148,7 @@ contract RootChain {
         // Record the exitable timestamp.
         require(exits[uid] == 0);
         exits[uid] = block.timestamp + 2 weeks;
-
-        // TODO: store exit information
-        // exitInfos[uid] = ExitInfo();
+        exitInfos[uid] = ExitInfo(msg.sender, curTxBlkNum, prevTxList[2].toAddress(), prevTxBlkNum, msg.value);
     }
 
     // Allow anyone to finalize an exit which has passed challenge phase
@@ -159,8 +160,8 @@ contract RootChain {
         ERC721 token721 = ERC721(tokenContract);
 
         bytes32 wuid = uintToBytes(uid);
-        token721.transfer(info.curTxRec, wallet[wuid]); // transfer the token
-        info.curTxRec.transfer(info.bond); // return the bond
+        token721.transfer(info.requester, wallet[wuid]); // transfer the token
+        info.requester.transfer(info.bond); // return the bond
 
         // remove token info
         delete wallet[wuid];
@@ -188,7 +189,7 @@ contract RootChain {
         ExitInfo storage info = exitInfos[uid];
         require(chaTxList[0].toUint() == info.curTxBlkNum); // prev block is curTx
         require(chaTxList[1].toUint() == uid); // same uid
-        // TODO: check signature of chaTx is info.curTxRec
+        // TODO: check signature of chaTx is info.requester
 
         bytes32 merkleHash = keccak256(chaTx);
         bytes32 root = childChain[chaTxBlkNum];
@@ -215,13 +216,28 @@ contract RootChain {
         require(chaTxList[0].toUint() == info.prevTxBlkNum); // prev block is prevTx
         require(chaTxList[1].toUint() == uid); // same uid
         require(chaTxBlkNum < info.curTxBlkNum); // before last tx
-        // TODO: check signature of chaTx is info.prevTxRec
+        // TODO: check signature of chaTx is info.prevOwner
 
         bytes32 merkleHash = keccak256(chaTx);
         bytes32 root = childChain[chaTxBlkNum];
         require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
 
         _invalidateExit(msg.sender, uid);
+    }
+
+    // This challenge presents a transaction prior to prevTx and not directly before it and has a deadline
+    // (this challenge is for the case of double spend a tx before prevTx)
+    // Before the deadline, exitter need to present a tx that spend this tx and before prevTx
+    // (if this is a double spend, such tx is not existed)
+    // If successfully response, exitter can claim the bond put up by challenger
+    // After the deadline, the challenge is considered valid and challenger can claim the bond of the exit request
+    function challengeType3(
+        uint uid
+    )
+        public
+        exitRequestExisted(uid)
+    {
+
     }
 
     function _invalidateExit(address challenger, uint uid) internal {
