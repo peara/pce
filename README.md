@@ -11,7 +11,7 @@ npm install
 ### Test
 With ganache in port 7545:
 ```
-npx truffle test --n
+npx truffle test --network ganache 
 ```
 
 ## Child chain
