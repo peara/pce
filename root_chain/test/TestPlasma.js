@@ -4,6 +4,7 @@ const BN = web3.BigNumber;
 
 import expectThrow from 'openzeppelin-solidity/test/helpers/expectThrow';
 import expectEvent from 'openzeppelin-solidity/test/helpers/expectEvent';
+import increaseTime from 'openzeppelin-solidity/test/helpers/increaseTime';
 import BN2B32 from './helpers/BigNumberToBytes32.js';
 
 contract("PlasmaCashAuthorityContract", async (accounts) => {
@@ -22,6 +23,8 @@ contract("PlasmaCashAuthorityContract", async (accounts) => {
   describe("Contract information", async () => {
     it("owner is correct", async () => {
       assert.equal(await instance.authority(), owner);
+      assert.equal((await instance.depositPeriod()).toNumber(), 600, 'Deposit Period is incorrect');
+      assert.equal((await instance.exitPeriod()).toNumber(), 604800, 'Exit Period is incorrect');
     });
 
     it("token contract is correct", async () => {
@@ -37,11 +40,11 @@ contract("PlasmaCashAuthorityContract", async (accounts) => {
     });
 
     it("Cannot deposit if not approved", async () => {
-      expectThrow(instance.deposit(2, { from: user2 }));
+      await expectThrow(instance.deposit(2, { from: user2 }));
     });
 
     it("Cannot deposit other token", async () => {
-      expectThrow(instance.deposit(2, { from: user1 }));
+      await expectThrow(instance.deposit(2, { from: user1 }));
     });
 
     it("can deposit approved token", async () => {
@@ -49,17 +52,49 @@ contract("PlasmaCashAuthorityContract", async (accounts) => {
         instance.deposit(1, { from: user1 }),
         'Deposit'
       );
-      assert.equal(await s721Instance.ownerOf(1), instance.address);
+      assert.equal(await s721Instance.ownerOf(1), instance.address, 'Owner is not Plasma contract');
+      let uid = event.args.uid;
+      let blockTime = web3.eth.getBlock(event.blockNumber).timestamp;
 
-      let uid = BN2B32(event.args.uid);
-      assert.deepEqual(await instance.wallet(uid), new BN(1));
-      assert.equal(await instance.tokenOwner(uid), user1);
-      assert.deepEqual(await instance.depositCount(), new BN(1));
+      assert.deepEqual(await instance.wallet(uid), new BN(1), 'Deposit token ID is incorrect');
+      assert.equal(await instance.tokenOwner(uid), user1, 'Depositor is incorrect');
+      assert.deepEqual(await instance.depositCount(), new BN(1), 'Deposit count is incorrect');
+      assert.equal((await instance.waitingDeposit(uid)).toNumber(), blockTime + 600, 'Cancel deadline is incorrect');
+    });
+
+    describe("can cancel deposit request", async () => {
+      before(async () => {
+        await s721Instance.mint(user1, 3, { from: owner });
+      });
 
       it("can cancel deposit request", async () => {
+        await s721Instance.approve(instance.address, 3, { from: user1 });
+        let event = await expectEvent.inTransaction(
+          instance.deposit(3, { from: user1 }),
+          'Deposit'
+        );
+        let uid = event.args.uid;
         await instance.cancelDeposit(uid, { from: user1 });
-        assert.equal(await s721Instance.ownerOf(1), user1);
-        assert.equal(instance.wallet(uid), 0);
+
+        assert.equal(await s721Instance.ownerOf(3), user1, 'Owner is not user');
+        assert.equal(await instance.wallet(uid), 0);
+        assert.equal(await instance.tokenOwner(uid), 0);
+      });
+
+      it("cannot cancel after depositPeriod", async () => {
+        await s721Instance.approve(instance.address, 3, { from: user1 });
+        let event = await expectEvent.inTransaction(
+          instance.deposit(3, { from: user1 }),
+          'Deposit'
+        );
+        let uid = event.args.uid;
+        let cancelDeadline = (await instance.waitingDeposit(uid)).toNumber();
+
+        await increaseTime(601);
+        console.log('Cancel time:  ', cancelDeadline);
+        console.log('Current time: ', web3.eth.getBlock('latest').timestamp);
+        assert.equal(web3.eth.getBlock('latest').timestamp > cancelDeadline, true, 'DepositPeriod not passed');
+        await expectThrow(instance.cancelDeposit(uid, { from: user1 }));
       });
     });
   });

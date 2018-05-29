@@ -7,7 +7,6 @@ import "./libraries/ECRecovery.sol";
 interface ERC721 {
     function ownerOf(uint _tokenID) external returns (address);
     function transferFrom(address _from, address _to, uint _tokenID) external;
-    function transfer(address _to, uint tokenID) external;
 }
 
 // TODO: missing operator bond (in ETH) and reward (in some token, or ETH if we have some fees)
@@ -29,7 +28,7 @@ contract RootChain {
     /*
      * Events
      */
-    event Deposit(address depositor, uint256 tokenID, uint256 uid);
+    event Deposit(address depositor, uint256 tokenID, bytes32 uid);
 
     /*
      * Storage
@@ -45,8 +44,8 @@ contract RootChain {
     mapping(bytes32 => uint) public wallet; // store deposited tokenID, this contract token ID => ERC721 token ID
     mapping(bytes32 => address) public tokenOwner; // store owner of tokenID, for checkpointing and client validation
     mapping(bytes32 => uint) public waitingDeposit; // store deadline of cancel deposit request
-    mapping(uint => uint) public exits; // store current exit requests
-    mapping(uint => ExitInfo) public exitInfos;
+    mapping(bytes32 => uint) public exits; // store current exit requests
+    mapping(bytes32 => ExitInfo) public exitInfos;
 
     /*
      * Modifiers
@@ -56,7 +55,7 @@ contract RootChain {
         _;
     }
 
-    modifier exitRequestExisted(uint uid) {
+    modifier exitRequestExisted(bytes32 uid) {
         require(exits[uid] != 0);
         require(block.timestamp < exits[uid]);
         _;
@@ -110,30 +109,28 @@ contract RootChain {
         waitingDeposit[uid] = block.timestamp + depositPeriod;
 
         depositCount += 1;
-        emit Deposit(msg.sender, tokenID, uint256(uid));
+        emit Deposit(msg.sender, tokenID, uid);
     }
 
     /**
         @dev Allow user to cancel deposit request incase of a blockwithholding attack happen right after deposit
             as the user won't have any knowledge to exit
-        @params uid - uid of the token in Plasma contract, retrievable from Deposit event
+        @param uid - uid of the token in Plasma contract, retrievable from Deposit event
     */
-    function cancelDeposit(uint uid)
+    function cancelDeposit(bytes32 uid)
         public
     {
-        bytes32 wuid = uintToBytes(uid);
-
-        require(tokenOwner[wuid] == msg.sender);
-        require(block.timestamp <= waitingDeposit[wuid]);
+        require(tokenOwner[uid] == msg.sender);
+        require(block.timestamp <= waitingDeposit[uid]);
 
         ERC721 token721 = ERC721(tokenContract);
 
-        token721.transfer(msg.sender, wallet[wuid]); // transfer the token
+        token721.transferFrom(address(this), msg.sender, wallet[uid]); // transfer the token
 
         // remove token info
-        delete wallet[wuid];
-        delete tokenOwner[wuid];
-        delete waitingDeposit[wuid];
+        delete wallet[uid];
+        delete tokenOwner[uid];
+        delete waitingDeposit[uid];
     }
 
     function normalExit(
@@ -167,14 +164,14 @@ contract RootChain {
         bytes32 hashTx = keccak256(txList[0].toBytes(), txList[1].toBytes(), txList[2].toBytes()); // should confirm hash of type address vs bytes
         require(hashTx.recover(txList[3].toBytes()) == prevTxList[2].toAddress()); // prevTx_to == signer of Tx
 
-        uint uid = txList[1].toUint();
+        bytes32 uid = txList[1].toBytes32();
 
         bytes32 prevMerkleHash = keccak256(prevTx);
         bytes32 prevRoot = childChain[prevTxBlkNum];
         bytes32 merkleHash = keccak256(curTx);
         bytes32 root = childChain[curTxBlkNum];
-        require(prevMerkleHash.checkMembership(uid, prevRoot, prevTxProof));
-        require(merkleHash.checkMembership(uid, root, curTxProof));
+        require(prevMerkleHash.checkMembership(uint(uid), prevRoot, prevTxProof));
+        require(merkleHash.checkMembership(uint(uid), root, curTxProof));
 
         // Record the exitable timestamp.
         require(exits[uid] == 0);
@@ -183,20 +180,19 @@ contract RootChain {
     }
 
     // Allow anyone to finalize an exit which has passed challenge phase
-    function finalizeExit(uint uid) public {
+    function finalizeExit(bytes32 uid) public {
         require(exits[uid] != 0);
         require(block.timestamp >= exits[uid]);
 
         ExitInfo storage info = exitInfos[uid];
         ERC721 token721 = ERC721(tokenContract);
 
-        bytes32 wuid = uintToBytes(uid);
-        token721.transfer(info.requester, wallet[wuid]); // transfer the token
+        token721.transferFrom(address(this), info.requester, wallet[uid]); // transfer the token
 
         // remove token info
-        delete wallet[wuid];
-        delete tokenOwner[wuid];
-        delete waitingDeposit[wuid];
+        delete wallet[uid];
+        delete tokenOwner[uid];
+        delete waitingDeposit[uid];
 
         // remove exit request
         delete exits[uid];
@@ -208,7 +204,7 @@ contract RootChain {
     // This challenge presents a transaction spend the last tx
     // will invalidate the exit request instantly if correct
     function challengeType1(
-        uint uid,
+        bytes32 uid,
         bytes chaTx,
         bytes chaTxProof,
         uint chaTxBlkNum
@@ -221,12 +217,12 @@ contract RootChain {
 
         ExitInfo storage info = exitInfos[uid];
         require(chaTxList[0].toUint() == info.curTxBlkNum); // prev block is curTx
-        require(chaTxList[1].toUint() == uid); // same uid
+        require(chaTxList[1].toBytes32() == uid); // same uid
         // TODO: check signature of chaTx is info.requester
 
         bytes32 merkleHash = keccak256(chaTx);
         bytes32 root = childChain[chaTxBlkNum];
-        require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
+        require(merkleHash.checkMembership(uint(uid), root, chaTxProof)); // valid proof
 
         _invalidateExit(msg.sender, uid);
     }
@@ -234,7 +230,7 @@ contract RootChain {
     // This challenge presents a transaction spend prevTx and before curTx
     // will invalidate the exit request instantly if correct
     function challengeType2(
-        uint uid,
+        bytes32 uid,
         bytes chaTx,
         bytes chaTxProof,
         uint chaTxBlkNum
@@ -247,13 +243,13 @@ contract RootChain {
 
         ExitInfo storage info = exitInfos[uid];
         require(chaTxList[0].toUint() == info.prevTxBlkNum); // prev block is prevTx
-        require(chaTxList[1].toUint() == uid); // same uid
+        require(chaTxList[1].toBytes32() == uid); // same uid
         require(chaTxBlkNum < info.curTxBlkNum); // before last tx
         // TODO: check signature of chaTx is info.prevOwner
 
         bytes32 merkleHash = keccak256(chaTx);
         bytes32 root = childChain[chaTxBlkNum];
-        require(merkleHash.checkMembership(uid, root, chaTxProof)); // valid proof
+        require(merkleHash.checkMembership(uint(uid), root, chaTxProof)); // valid proof
 
         _invalidateExit(msg.sender, uid);
     }
@@ -265,7 +261,7 @@ contract RootChain {
     // If successfully response, exitter can claim the bond put up by challenger
     // After the deadline, the challenge is considered valid and challenger can claim the bond of the exit request
     function challengeType3(
-        uint uid
+        bytes32 uid
     )
         public
         exitRequestExisted(uid)
@@ -273,7 +269,7 @@ contract RootChain {
 
     }
 
-    function _invalidateExit(address challenger, uint uid) internal {
+    function _invalidateExit(address challenger, bytes32 uid) internal {
         challenger.transfer(exitInfos[uid].bond); // send bond to challenger
         delete exits[uid];
         delete exitInfos[uid];
